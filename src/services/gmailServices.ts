@@ -1,17 +1,48 @@
 // src/services/gmailService.ts
 import { google } from "googleapis";
 import { prisma } from "../prisma";
-import { decrypt, encrypt } from "../utils/crypto";
+import { decrypt } from "../utils/crypto";
 import { parseSubscriptionsFromEmails } from "./subscriptionService";
+import { addDays } from "date-fns";
+import subs from "../data/subs.json";
 
 const CLIENT_ID = process.env.GOOGLE_CLIENT_ID!;
 const CLIENT_SECRET = process.env.GOOGLE_CLIENT_SECRET!;
-const oauth2ClientFactory = (redirectUri: string) =>
-  new google.auth.OAuth2(CLIENT_ID, CLIENT_SECRET, redirectUri);
+
+/**
+ * 🔍 Decode Gmail message body safely
+ */
+function getMessageBody(payload: any): string {
+  if (!payload) return "";
+
+  // Check direct body data
+  if (payload.body?.data) {
+    const decoded = Buffer.from(payload.body.data, "base64").toString("utf8");
+    return decoded;
+  }
+
+  // If multipart, search for text/plain or text/html
+  if (payload.parts && Array.isArray(payload.parts)) {
+    for (const part of payload.parts) {
+      if (part.mimeType === "text/plain" || part.mimeType === "text/html") {
+        if (part.body?.data) {
+          const decoded = Buffer.from(part.body.data, "base64").toString(
+            "utf8"
+          );
+          return decoded;
+        }
+      }
+      // recursive search for nested multipart/alternative sections
+      const nested = getMessageBody(part);
+      if (nested) return nested;
+    }
+  }
+
+  return "";
+}
 
 // fetch messages and run parser; save subscriptions into DB
 export async function scanUserGmailForSubscriptions(userId: string) {
-  // locate token
   const token = await prisma.googleToken.findUnique({ where: { userId } });
   if (!token) throw new Error("No google token for user");
 
@@ -25,40 +56,48 @@ export async function scanUserGmailForSubscriptions(userId: string) {
 
   const gmail = google.gmail({ version: "v1", auth: oauth2Client });
 
-  // 1) list messages — we'll search for common subscription keywords and known senders
-  // Note: Gmail API allows `q` parameter similar to search box (helps narrow down).
-  const searchQueries = [
-    'subject:(subscription OR receipt OR invoice OR "payment" OR "renewal" OR "FirstBank")',
-    'from:billing OR from:receipt OR from:invoice OR "donotreply" OR "no-reply"',
-    'subject:(welcome OR "your subscription")',
-  ];
+  // ⚡ Only fetch emails from the past year
+  const oneYearAgo = new Date();
+  oneYearAgo.setFullYear(oneYearAgo.getFullYear() - 1);
+  const afterTimestamp = Math.floor(oneYearAgo.getTime() / 1000);
 
-  const collectedEmails: { id: string; snippet?: string }[] = [];
+  // ⚡ Smart search using subs.json names
+  const keywordQueries = subs.map(
+    (name) =>
+      `after:${afterTimestamp} (subject:${name} OR from:${name} OR "${name}")`
+  );
 
-  for (const q of searchQueries) {
+  if (keywordQueries.length === 0) {
+    keywordQueries.push(
+      `after:${afterTimestamp} subject:(subscription OR invoice OR payment)`
+    );
+  }
+
+  const collectedEmails: { id: string }[] = [];
+
+  for (const q of keywordQueries) {
     try {
       const list = await gmail.users.messages.list({
         userId: "me",
         q,
-        maxResults: 200,
+        maxResults: 100,
       });
       const msgs = list.data.messages || [];
-      for (const m of msgs) {
-        collectedEmails.push({ id: m.id! });
-      }
+      for (const m of msgs) collectedEmails.push({ id: m.id! });
     } catch (err) {
-      console.error("Gmail list error", err);
+      console.error("⚠️ Gmail list error:", err);
     }
   }
 
-  // Deduplicate ids
+  // 🧩 Remove duplicates
   const uniqueIds = Array.from(new Set(collectedEmails.map((x) => x.id))).slice(
     0,
-    500
-  ); // limit
+    400
+  );
 
-  // Fetch message details in batches
+  // 🧠 Fetch message details with HTML decoding
   const detailed: { id: string; snippet?: string; payload?: any }[] = [];
+
   for (const id of uniqueIds) {
     try {
       const resp = await gmail.users.messages.get({
@@ -66,26 +105,36 @@ export async function scanUserGmailForSubscriptions(userId: string) {
         id,
         format: "full",
       });
+
+      // Decode body content
+      const decodedBody = getMessageBody(resp.data.payload);
+      const combinedSnippet = [resp.data.snippet ?? "", decodedBody ?? ""].join(
+        "\n"
+      );
+
       detailed.push({
         id,
-        snippet: resp.data.snippet ?? undefined, // <-- turns null → undefined,
+        snippet: combinedSnippet,
         payload: resp.data.payload,
       });
     } catch (err) {
-      console.warn("Failed to get message", id, err);
+      console.warn("⚠️ Failed to get message", id, err);
     }
   }
 
-  // 2) Parse subscriptions from messages
+  // 🔍 Parse using improved snippet content
   const parsed = parseSubscriptionsFromEmails(detailed);
 
-  // 3) Upsert subscriptions into DB for user
+  // 💾 Save or update
   const saved: any[] = [];
   for (const p of parsed) {
-    // crude matching: provider + product + user
     const existing = await prisma.subscription.findFirst({
       where: { userId, provider: p.provider, product: p.product },
     });
+
+    const nextBilling =
+      p.nextBilling ?? (p.startDate ? addDays(p.startDate, 30) : null);
+
     if (existing) {
       const updated = await prisma.subscription.update({
         where: { id: existing.id },
@@ -93,7 +142,7 @@ export async function scanUserGmailForSubscriptions(userId: string) {
           amount: p.amount ?? existing.amount,
           currency: p.currency ?? existing.currency,
           startDate: p.startDate ?? existing.startDate,
-          nextBilling: p.nextBilling ?? existing.nextBilling,
+          nextBilling,
           rawData: p.rawData ?? existing.rawData,
         },
       });
@@ -107,7 +156,7 @@ export async function scanUserGmailForSubscriptions(userId: string) {
           amount: p.amount,
           currency: p.currency,
           startDate: p.startDate,
-          nextBilling: p.nextBilling,
+          nextBilling,
           rawData: p.rawData,
         },
       });

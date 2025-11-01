@@ -1,8 +1,6 @@
 // src/services/subscriptionService.ts
-// Parses messages returned from Gmail API into subscription-like objects.
-// This file contains heuristics — NOT perfect but practical. You can extend the provider list.
-
 import { parseISO, addDays } from "date-fns";
+import subs from "../data/subs.json"; // ✅ load known subscriptions
 
 type EmailMsg = { id: string; snippet?: string; payload?: any };
 
@@ -28,6 +26,7 @@ const knownProviders = [
   "amazon",
 ];
 
+// 🧩 Guess provider from email headers
 function guessProviderFromHeaders(payload: any): string | null {
   if (!payload) return null;
   const headers = payload.headers || [];
@@ -41,18 +40,17 @@ function guessProviderFromHeaders(payload: any): string | null {
   return null;
 }
 
+// 💰 Extract amount + currency
 function extractAmount(snippet: string): {
   amount?: number;
   currency?: string;
 } {
-  // naive regex for amounts $12.99, USD 12.99, 12.99 USD
   const moneyRegex =
-    /(?:USD|\$|EUR|€|NGN|₦)?\s?([0-9]+(?:[.,][0-9]{1,2})?)\s?(?:USD|EUR|NGN|NGN|₦)?/i;
+    /(?:USD|\$|EUR|€|NGN|₦)?\s?([0-9]+(?:[.,][0-9]{1,2})?)\s?(?:USD|EUR|NGN|₦)?/i;
   const m = snippet.match(moneyRegex);
   if (!m) return {};
   const raw = m[1].replace(",", ".");
   const num = parseFloat(raw);
-  // currency detection
   const currency = snippet.includes("$")
     ? "USD"
     : snippet.includes("€")
@@ -63,53 +61,69 @@ function extractAmount(snippet: string): {
   return { amount: num, currency };
 }
 
+// 📅 Extract possible dates (start or next billing)
 function extractDates(snippet: string): {
   start?: Date | null;
   next?: Date | null;
 } {
-  // Look for common date patterns YYYY-MM-DD, DD MMM YYYY, Month DD, YYYY, etc.
-  // We'll try a few regexes:
   const iso = snippet.match(/\b(20\d{2}[-\/]\d{1,2}[-\/]\d{1,2})\b/);
   if (iso) {
     try {
       const d = new Date(iso[1]);
-      return { start: d };
+      return { start: d, next: addDays(d, 30) }; // assume monthly if only one date found
     } catch {}
   }
-  // Match Month name patterns e.g. "August 12, 2025"
+
   const longDate = snippet.match(
     /\b(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Sept|Oct|Nov|Dec)[a-z]*\s+\d{1,2},\s*\d{4}\b/i
   );
   if (longDate) {
     try {
-      return { start: new Date(longDate[0]) };
+      const d = new Date(longDate[0]);
+      return { start: d, next: addDays(d, 30) };
     } catch {}
   }
-  // fallback: none
+
   return { start: null, next: null };
 }
 
 export function parseSubscriptionsFromEmails(msgs: EmailMsg[]): ParsedSub[] {
   const results: ParsedSub[] = [];
+
+  const subscriptionKeywords = [
+    "subscription",
+    "renewal",
+    "renewed",
+    "payment",
+    "invoice",
+    "charged",
+    "billed",
+    "receipt",
+    "plan",
+    "auto-renew",
+    "membership",
+  ];
+
+  const brandKeywords = subs.map((s) => s.toLowerCase());
+
   for (const m of msgs) {
     const snippet = (m.snippet || "").toLowerCase();
     const providerFromHeader = guessProviderFromHeaders(m.payload);
+
+    const hasBrand = brandKeywords.some((b) => snippet.includes(b));
+    const hasPayment = subscriptionKeywords.some((k) => snippet.includes(k));
+    if (!hasBrand || !hasPayment) continue;
+
+    if (!snippet.match(/\$|₦|€|£|\d{1,5}\s?(usd|ngn|eur|gbp)/i)) continue;
+
     const provider =
       providerFromHeader ||
       knownProviders.find((p) => snippet.includes(p)) ||
       "unknown";
 
-    // crude heuristics: if snippet contains "subscription" or "renew" or "receipt" or "invoice" treat as candidate
-    if (
-      !/(subscription|renew|renewal|invoice|receipt|charged|payment)/i.test(
-        m.snippet || ""
-      )
-    )
-      continue;
-
     const { amount, currency } = extractAmount(m.snippet || "");
     const { start, next } = extractDates(m.snippet || "");
-    // product name guess
+
     let product: string | undefined;
     const prodMatch = m.snippet?.match(
       /(plan|subscription|membership|premium|pro|plus|monthly|annual)[\s:]*([A-Za-z0-9 -]+)/i
@@ -122,7 +136,7 @@ export function parseSubscriptionsFromEmails(msgs: EmailMsg[]): ParsedSub[] {
       amount,
       currency,
       startDate: start || null,
-      nextBilling: next || null,
+      nextBilling: next || (start ? addDays(start, 30) : null),
       rawData: {
         messageId: m.id,
         snippet: m.snippet,
@@ -130,11 +144,12 @@ export function parseSubscriptionsFromEmails(msgs: EmailMsg[]): ParsedSub[] {
     });
   }
 
-  // optionally dedupe by provider+product
+  // Deduplicate
   const grouped = new Map<string, ParsedSub>();
   for (const r of results) {
     const key = `${r.provider}::${r.product ?? "unknown"}`;
     if (!grouped.has(key)) grouped.set(key, r);
   }
+
   return Array.from(grouped.values());
 }
