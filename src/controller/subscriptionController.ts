@@ -1,4 +1,3 @@
-// src/controller/subscriptionController.ts
 import { Request, Response } from "express";
 import { prisma } from "../prisma";
 
@@ -22,8 +21,15 @@ export const createSubscription = async (req: Request, res: Response) => {
   if (!userId) return res.status(401).json({ error: "Unauthorized" });
 
   try {
-    const { provider, product, amount, currency, startDate, nextBilling } =
-      req.body;
+    const {
+      provider,
+      product,
+      amount,
+      currency,
+      startDate,
+      expiryDate,
+      nextBilling,
+    } = req.body;
 
     const newSub = await prisma.subscription.create({
       data: {
@@ -32,8 +38,9 @@ export const createSubscription = async (req: Request, res: Response) => {
         product,
         amount,
         currency,
-        startDate,
-        nextBilling,
+        startDate: startDate ? new Date(Date.now()) : null,
+        expiryDate: expiryDate ? new Date(expiryDate) : null,
+        nextBilling: nextBilling ? new Date(nextBilling) : null,
       },
     });
 

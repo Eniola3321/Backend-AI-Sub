@@ -1,4 +1,3 @@
-// src/routes/subscriptions.ts
 import { Router } from "express";
 import { requireAuth } from "../middleware/auth";
 import {

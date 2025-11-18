@@ -3,6 +3,7 @@ import { google } from "googleapis";
 import { prisma } from "../prisma";
 import { decrypt, encrypt } from "../utils/crypto";
 import { parseSubscriptionsFromEmails } from "./subscriptionService";
+import telegramController from "../controller/telegramController";
 import subs from "../data/subs.json";
 
 const CLIENT_ID = process.env.GOOGLE_CLIENT_ID!;
@@ -96,8 +97,23 @@ export async function scanUserGmailForSubscriptions(userId: string) {
 
   console.log(`✅ Parsed ${parsed.length} subscriptions`);
 
+  // ✅ TELEGRAM: Check if user has notifications enabled (START)
+  const user = await prisma.user.findUnique({
+    where: { id: userId },
+    select: {
+      hasPaidForTelegram: true,
+      telegramChatId: true,
+    },
+  });
+
+  const canSendTelegram =
+    user?.hasPaidForTelegram && user?.telegramChatId !== null;
+  // ✅ TELEGRAM: Check if user has notifications enabled (END)
+
   // 3) Upsert subscriptions into DB for user
   const saved: any[] = [];
+  const newSubscriptions: any[] = []; // ✅ TELEGRAM: Track new subscriptions
+
   for (const p of parsed) {
     // 🔥 Look up the tag from subs.json based on provider name
     const providerInfo = subs.find(
@@ -150,11 +166,34 @@ export async function scanUserGmailForSubscriptions(userId: string) {
         },
       });
       saved.push(created);
+      newSubscriptions.push(created); // ✅ TELEGRAM: Track new subscription
       console.log(`✨ Created new subscription: ${p.provider} (${tag})`);
+
+      // ✅ TELEGRAM: Send notification for NEW subscription (START)
+      if (canSendTelegram) {
+        try {
+          await telegramController.notifyNewSubscriptionFound(userId, created);
+          console.log(`📱 Telegram notification sent for ${p.provider}`);
+        } catch (error) {
+          console.error(`📱 Failed to send Telegram notification:`, error);
+        }
+      }
+      // ✅ TELEGRAM: Send notification for NEW subscription (END)
     }
   }
 
   console.log(`💾 Saved ${saved.length} subscriptions to database`);
+
+  // ✅ TELEGRAM: Send scan completion notification (START)
+  if (canSendTelegram) {
+    try {
+      await telegramController.notifyScanCompleted(userId, saved.length);
+      console.log(`📱 Telegram scan completion notification sent`);
+    } catch (error) {
+      console.error(`📱 Failed to send scan completion notification:`, error);
+    }
+  }
+  // ✅ TELEGRAM: Send scan completion notification (END)
 
   return saved;
 }
