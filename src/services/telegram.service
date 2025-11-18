@@ -1,0 +1,141 @@
+/*import TelegramBot from "node-telegram-bot-api";
+import { prisma } from "../prisma";
+
+const botToken = process.env.TELEGRAM_BOT_TOKEN!;
+const bot = new TelegramBot(botToken, { polling: true });
+
+/**
+ *  STEP 1: User starts the bot
+ * They send /start and then their real email to link Telegram.
+ //
+bot.onText(/\/start/, async (msg) => {
+  const chatId = msg.chat.id;
+
+  await bot.sendMessage(
+    chatId,
+    "👋 Welcome! Please reply with your registered email so I can link your Telegram account with your AI subscription."
+  );
+});
+
+// STEP 2: User sends their email to link Telegram to existing account
+bot.on("message", async (msg) => {
+  const chatId = msg.chat.id;
+  const text = msg.text?.trim();
+
+  // Ignore /start
+  if (!text || text.startsWith("/start")) return;
+
+  if (text.includes("@")) {
+    const email = text.toLowerCase();
+
+    const user = await prisma.user.findUnique({ where: { email } });
+
+    if (!user) {
+      await bot.sendMessage(
+        chatId,
+        "❌ Sorry, I couldn’t find any user with that email. Please make sure you signed up first."
+      );
+      return;
+    }
+
+    // Update user with Telegram chat ID
+    await prisma.user.update({
+      where: { email },
+      data: { telegramChatId: chatId },
+    });
+
+    await bot.sendMessage(
+      chatId,
+      ` Great! Your Telegram has been linked to ${email}. You’ll now receive subscription reminders here.`
+    );
+  }
+});
+
+/**
+ * 🗓 STEP 3: Weekly notification function
+ * - Sends messages only to users with a Telegram chat ID.
+ * - Notifies about:
+ *   - Active subscriptions
+ *   - Expired subscriptions
+ *   - 3-day renewal reminders
+ //
+export const sendWeeklyNotification = async () => {
+  const today = new Date();
+
+  // Fetch all subscriptions whose users have Telegram linked
+  const subscriptions = await prisma.subscription.findMany({
+    where: {
+      user: {
+        telegramChatId: { not: null },
+      },
+    },
+    include: {
+      user: true,
+    },
+  });
+
+  console.log(`🔎 Found ${subscriptions.length} subscriptions to check`);
+
+  for (const sub of subscriptions) {
+    const {
+      user,
+      product,
+      provider,
+      nextBilling,
+      expiryDate,
+      renewalDate,
+      status,
+    } = sub;
+    const chatId = user.telegramChatId!;
+    const name = user.name || user.email.split("@")[0];
+
+    // Skip subscriptions with null expiry or renewal dates
+    if (!expiryDate && !nextBilling && !renewalDate) {
+      console.log(
+        `⚠️ Skipping subscription for ${user.email}: missing key dates`
+      );
+      continue;
+    }
+    const targetDate = expiryDate || renewalDate || nextBilling;
+    const daysLeft = Math.ceil(
+      (new Date(targetDate!).getTime() - today.getTime()) /
+        (1000 * 60 * 60 * 24)
+    );
+
+    let message = "";
+
+    if (daysLeft <= 0) {
+      // Expired
+      if (status !== "expired") {
+        await prisma.subscription.update({
+          where: { id: sub.id },
+          data: { status: "expired" },
+        });
+      }
+      message = `⚠️ Hello ${name}, your ${provider} subscription (“${
+        product || "AI Plan"
+      }”) expired on ${new Date(
+        targetDate!
+      ).toDateString()}. Please renew soon.`;
+    } else if (daysLeft === 3) {
+      // Reminder (3 days before expiry)
+      message = `⏰ Hey ${name}, reminder: your ${provider} subscription (“${
+        product || "AI Plan"
+      }”) will expire in 3 days (${new Date(targetDate!).toDateString()}).`;
+    } else {
+      // Active
+      message = `✅ Hello ${name}, your ${provider} subscription (“${
+        product || "AI Plan"
+      }”) is active.\nNext billing: ${new Date(targetDate!).toDateString()}.`;
+    }
+
+    try {
+      await bot.sendMessage(chatId, message);
+      console.log(`📨 Sent to ${user.email}`);
+    } catch (err) {
+      console.error(`❌ Failed to send message to ${user.email}:`, err);
+    }
+  }
+};
+export default bot;
+*/

@@ -3,6 +3,8 @@ import { google } from "googleapis";
 import { prisma } from "../prisma";
 import { decrypt, encrypt } from "../utils/crypto";
 import { parseSubscriptionsFromEmails } from "./subscriptionService";
+import telegramController from "../controller/telegramController";
+import subs from "../data/subs.json";
 
 const CLIENT_ID = process.env.GOOGLE_CLIENT_ID!;
 const CLIENT_SECRET = process.env.GOOGLE_CLIENT_SECRET!;
@@ -25,12 +27,24 @@ export async function scanUserGmailForSubscriptions(userId: string) {
 
   const gmail = google.gmail({ version: "v1", auth: oauth2Client });
 
-  // 1) list messages — we'll search for common subscription keywords and known senders
-  // Note: Gmail API allows `q` parameter similar to search box (helps narrow down).
+  // 🔥 Calculate date range: from January 1st of last year to now
+  const now = new Date();
+  const currentYear = now.getFullYear();
+  const lastYear = currentYear - 1;
+  const startDate = new Date(lastYear, 0, 1); // January 1st of last year
+
+  // Format dates for Gmail search (YYYY/MM/DD)
+  const afterDate = `${startDate.getFullYear()}/${String(
+    startDate.getMonth() + 1
+  ).padStart(2, "0")}/${String(startDate.getDate()).padStart(2, "0")}`;
+
+  console.log(`📅 Searching emails from ${afterDate} to now`);
+
+  // 1) list messages with date filter
   const searchQueries = [
-    'subject:(subscription OR receipt OR invoice OR "payment" OR "renewal" OR "FirstBank")',
-    'from:billing OR from:receipt OR from:invoice OR "donotreply" OR "no-reply"',
-    'subject:(welcome OR "your subscription")',
+    `after:${afterDate} subject:(subscription OR receipt OR invoice OR "payment" OR "renewal")`,
+    `after:${afterDate} from:billing OR from:receipt OR from:invoice OR "donotreply" OR "no-reply"`,
+    `after:${afterDate} subject:(welcome OR "your subscription")`,
   ];
 
   const collectedEmails: { id: string; snippet?: string }[] = [];
@@ -57,6 +71,8 @@ export async function scanUserGmailForSubscriptions(userId: string) {
     500
   ); // limit
 
+  console.log(`📧 Found ${uniqueIds.length} unique emails to analyze`);
+
   // Fetch message details in batches
   const detailed: { id: string; snippet?: string; payload?: any }[] = [];
   for (const id of uniqueIds) {
@@ -68,7 +84,7 @@ export async function scanUserGmailForSubscriptions(userId: string) {
       });
       detailed.push({
         id,
-        snippet: resp.data.snippet ?? undefined, // <-- turns null → undefined,
+        snippet: resp.data.snippet ?? undefined,
         payload: resp.data.payload,
       });
     } catch (err) {
@@ -79,26 +95,63 @@ export async function scanUserGmailForSubscriptions(userId: string) {
   // 2) Parse subscriptions from messages
   const parsed = parseSubscriptionsFromEmails(detailed);
 
+  console.log(`✅ Parsed ${parsed.length} subscriptions`);
+
+  // ✅ TELEGRAM: Check if user has notifications enabled (START)
+  const user = await prisma.user.findUnique({
+    where: { id: userId },
+    select: {
+      hasPaidForTelegram: true,
+      telegramChatId: true,
+    },
+  });
+
+  const canSendTelegram =
+    user?.hasPaidForTelegram && user?.telegramChatId !== null;
+  // ✅ TELEGRAM: Check if user has notifications enabled (END)
+
   // 3) Upsert subscriptions into DB for user
   const saved: any[] = [];
+  const newSubscriptions: any[] = []; // ✅ TELEGRAM: Track new subscriptions
+
   for (const p of parsed) {
-    // crude matching: provider + product + user
+    // 🔥 Look up the tag from subs.json based on provider name
+    const providerInfo = subs.find(
+      (s) => s.name.toLowerCase() === p.provider.toLowerCase()
+    );
+    const tag = providerInfo?.tag || "other";
+
+    console.log(`💾 Processing ${p.provider} (${p.currency} ${p.amount})...`);
+
+    // 🔥 MATCH BY PROVIDER NAME ONLY (ignore product variations)
+    // This prevents duplicates like "Canva Pro" vs "Canva Premium" vs "Canva"
     const existing = await prisma.subscription.findFirst({
-      where: { userId, provider: p.provider, product: p.product },
+      where: {
+        userId,
+        provider: p.provider,
+      },
     });
+
     if (existing) {
+      // 🔥 ALWAYS UPDATE - replace old data with new data
       const updated = await prisma.subscription.update({
         where: { id: existing.id },
         data: {
-          amount: p.amount ?? existing.amount,
-          currency: p.currency ?? existing.currency,
-          startDate: p.startDate ?? existing.startDate,
-          nextBilling: p.nextBilling ?? existing.nextBilling,
-          rawData: p.rawData ?? existing.rawData,
+          amount: p.amount,
+          currency: p.currency,
+          product: p.product || existing.product,
+          startDate: p.startDate,
+          nextBilling: p.nextBilling,
+          tag: tag,
+          rawData: p.rawData,
         },
       });
       saved.push(updated);
+      console.log(
+        `✏️  Updated ${p.provider}: ${existing.amount} → ${p.amount} (newer data)`
+      );
     } else {
+      // Create new subscription
       const created = await prisma.subscription.create({
         data: {
           userId,
@@ -108,12 +161,39 @@ export async function scanUserGmailForSubscriptions(userId: string) {
           currency: p.currency,
           startDate: p.startDate,
           nextBilling: p.nextBilling,
+          tag: tag,
           rawData: p.rawData,
         },
       });
       saved.push(created);
+      newSubscriptions.push(created); // ✅ TELEGRAM: Track new subscription
+      console.log(`✨ Created new subscription: ${p.provider} (${tag})`);
+
+      // ✅ TELEGRAM: Send notification for NEW subscription (START)
+      if (canSendTelegram) {
+        try {
+          await telegramController.notifyNewSubscriptionFound(userId, created);
+          console.log(`📱 Telegram notification sent for ${p.provider}`);
+        } catch (error) {
+          console.error(`📱 Failed to send Telegram notification:`, error);
+        }
+      }
+      // ✅ TELEGRAM: Send notification for NEW subscription (END)
     }
   }
+
+  console.log(`💾 Saved ${saved.length} subscriptions to database`);
+
+  // ✅ TELEGRAM: Send scan completion notification (START)
+  if (canSendTelegram) {
+    try {
+      await telegramController.notifyScanCompleted(userId, saved.length);
+      console.log(`📱 Telegram scan completion notification sent`);
+    } catch (error) {
+      console.error(`📱 Failed to send scan completion notification:`, error);
+    }
+  }
+  // ✅ TELEGRAM: Send scan completion notification (END)
 
   return saved;
 }

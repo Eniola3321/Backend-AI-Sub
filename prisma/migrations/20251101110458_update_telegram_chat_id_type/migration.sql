@@ -1,0 +1,2 @@
+-- AlterTable
+ALTER TABLE "User" ALTER COLUMN "telegramChatId" SET DATA TYPE BIGINT;

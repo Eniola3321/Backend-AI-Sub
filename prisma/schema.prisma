@@ -8,15 +8,34 @@ datasource db {
 }
 
 model User {
-  id            String         @id @default(uuid())
-  email         String         @unique
-  name          String?
-  passwordHash  String?
-  googleId      String?        @unique
-  createdAt     DateTime       @default(now())
-  updatedAt     DateTime       @updatedAt
-  googleTokens  GoogleToken?
-  subscriptions Subscription[]
+  id                 String         @id @default(uuid())
+  email              String         @unique
+  telegramChatId     BigInt?
+  name               String?
+  passwordHash       String?
+  googleId           String?        @unique
+  hasPaidForScanning Boolean        @default(false)  // NEW
+  hasPaidForTelegram Boolean        @default(false)  // NEW
+  createdAt          DateTime       @default(now())
+  updatedAt          DateTime       @updatedAt
+  googleTokens       GoogleToken?
+  subscriptions      Subscription[]
+  payments           Payment[]      // NEW
+}
+
+model Payment {
+  id             String    @id @default(uuid())
+  userId         String
+  amount         Float
+  currency       String    @default("USD")
+  paymentType    String    // "scanning" | "telegram" | "bundle"
+  paymentGateway String    // "stripe" | "paystack"
+  paymentStatus  String    @default("pending") // "pending" | "success" | "failed"
+  reference      String    @unique
+  metadata       Json?
+  createdAt      DateTime  @default(now())
+  updatedAt      DateTime  @updatedAt
+  user           User      @relation(fields: [userId], references: [id], onDelete: Cascade)
 }
 
 model GoogleToken {
@@ -36,10 +55,14 @@ model Subscription {
   userId      String
   provider    String
   product     String?
+  tag         String
   amount      Float?
   currency    String?
   startDate   DateTime?
   nextBilling DateTime?
+  expiryDate  DateTime?
+  renewalDate DateTime?
+  status      String?   @default("active")
   rawData     Json?
   createdAt   DateTime  @default(now())
   updatedAt   DateTime  @updatedAt
