@@ -161,6 +161,8 @@ export class PaymentService {
         }
       );
 
+      console.log(`Paystack API response: ${JSON.stringify(response.data)}`);
+
       return {
         success: true,
         message: "Payment initialized successfully",

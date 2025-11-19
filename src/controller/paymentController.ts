@@ -90,6 +90,12 @@ export class PaymentController {
         userCountry,
       });
 
+      // Log Paystack reference for verification
+      if (result.data?.gateway === "paystack") {
+        console.log(`Paystack reference: ${result.data.reference}`);
+        console.log(`Authorization URL: ${result.data.authorizationUrl}`);
+      }
+
       res.status(200).json(result);
     } catch (error: any) {
       console.error("Initialize payment error:", error);
@@ -220,10 +226,10 @@ export class PaymentController {
    */
   async paystackWebhook(req: Request, res: Response): Promise<void> {
     try {
-      // Verify Paystack signature
+      // Verify Paystack signature using raw body
       const hash = crypto
         .createHmac("sha512", process.env.PAYSTACK_SECRET_KEY!)
-        .update(JSON.stringify(req.body))
+        .update(req.body)
         .digest("hex");
 
       if (hash !== req.headers["x-paystack-signature"]) {

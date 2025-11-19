@@ -21,7 +21,7 @@ const rawBodyMiddleware = (req: any, res: any, next: any) => {
 // IMPORTANT: These routes need raw body, not JSON parsed body
 router.post(
   "/paystack",
-  rawBodyMiddleware,
+  express.raw({ type: "application/json" }),
   paymentController.paystackWebhook.bind(paymentController)
 );
 
